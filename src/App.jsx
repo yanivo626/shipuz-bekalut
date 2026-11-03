@@ -628,6 +628,39 @@ async function deletePhoto(photoKey) {
   } catch {}
 }
 
+// PDF files go to the same bucket as real files (no compression / re-encoding).
+// Max 10MB per file so a single upload can't eat the free-tier storage quota.
+const MAX_PDF_BYTES = 10 * 1024 * 1024;
+function pdfStoragePath(fileKey) {
+  return `${_storageUserId}/${_storageProjectId}/${fileKey}.pdf`;
+}
+async function savePdf(fileKey, file) {
+  try {
+    const { error } = await supabase.storage
+      .from("project-photos")
+      .upload(pdfStoragePath(fileKey), file, { contentType: "application/pdf", upsert: true });
+    return !error;
+  } catch {
+    return false;
+  }
+}
+async function getPdfUrl(fileKey) {
+  try {
+    const { data, error } = await supabase.storage
+      .from("project-photos")
+      .createSignedUrl(pdfStoragePath(fileKey), 3600);
+    if (error || !data) return null;
+    return data.signedUrl;
+  } catch {
+    return null;
+  }
+}
+async function deletePdf(fileKey) {
+  try {
+    await supabase.storage.from("project-photos").remove([pdfStoragePath(fileKey)]);
+  } catch {}
+}
+
 // Standalone documents added directly to the document library (not attached
 // to any specific quote) — e.g. a permit, a warranty booklet, a floor plan.
 async function loadGeneralDocs(projectId) {
@@ -2417,16 +2450,49 @@ function PhotoLightbox({ dataUrl, label, onClose }) {
 
 function DocumentThumbnail({ doc, onOpen, onDelete }) {
   const [dataUrl, setDataUrl] = useState(null);
+  const isPdf = doc.kind === "pdf";
 
   useEffect(() => {
     let cancelled = false;
-    loadPhoto(doc.photoKey).then((v) => {
+    const loader = isPdf ? getPdfUrl(doc.photoKey) : loadPhoto(doc.photoKey);
+    loader.then((v) => {
       if (!cancelled) setDataUrl(v);
     });
     return () => {
       cancelled = true;
     };
-  }, [doc.photoKey]);
+  }, [doc.photoKey, isPdf]);
+
+  if (dataUrl && isPdf) {
+    return (
+      <div className="relative">
+        <a
+          href={dataUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={`flex flex-col items-center justify-center w-full rounded-lg text-center px-1 ${FOCUS_RING}`}
+          style={{ aspectRatio: "1", background: C.accentSoft, color: C.accentText, fontFamily: "Assistant, sans-serif" }}
+          aria-label={`פתיחת ${doc.label} (PDF)`}
+        >
+          <span className="text-2xl" aria-hidden="true">📄</span>
+          <span className="text-[10px] font-bold mt-1">PDF</span>
+          <span className="text-[10px] truncate max-w-full" style={{ color: C.textMuted }}>
+            {doc.label}
+          </span>
+        </a>
+        {onDelete && (
+          <button
+            onClick={onDelete}
+            aria-label={`מחיקת ${doc.label}`}
+            className={`absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full text-[10px] font-bold ${FOCUS_RING}`}
+            style={{ background: C.text, color: C.cardAlt }}
+          >
+            ✕
+          </button>
+        )}
+      </div>
+    );
+  }
 
   if (!dataUrl) {
     return (
@@ -2472,33 +2538,52 @@ function GeneralDocUploadButton({ onAdd }) {
   const inputId = useId();
   const [busy, setBusy] = useState(false);
   const [label, setLabel] = useState("");
+  const [error, setError] = useState(null);
 
   const handleFile = async (e) => {
     const file = e.target.files && e.target.files[0];
     e.target.value = "";
     if (!file) return;
+    setError(null);
+    const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+    if (isPdf && file.size > MAX_PDF_BYTES) {
+      setError("קובץ ה-PDF גדול מדי (עד 10MB).");
+      return;
+    }
     setBusy(true);
     try {
-      const compressed = await compressImageFile(file);
-      const key = `general-doc-photo:${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
-      const ok = await savePhoto(key, compressed);
-      if (ok) {
-        onAdd({
-          id: key,
-          photoKey: key,
-          label: label.trim() || "מסמך כללי",
-        });
-        setLabel("");
+      const suffix = `${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
+      const fallbackLabel = isPdf ? file.name.replace(/\.pdf$/i, "") : "";
+      if (isPdf) {
+        const key = `general-doc-file:${suffix}`;
+        const ok = await savePdf(key, file);
+        if (ok) {
+          onAdd({ id: key, photoKey: key, kind: "pdf", label: label.trim() || fallbackLabel || "מסמך PDF" });
+          setLabel("");
+        } else {
+          setError("ההעלאה נכשלה, נסו שוב.");
+        }
+      } else {
+        const compressed = await compressImageFile(file);
+        const key = `general-doc-photo:${suffix}`;
+        const ok = await savePhoto(key, compressed);
+        if (ok) {
+          onAdd({ id: key, photoKey: key, label: label.trim() || "מסמך כללי" });
+          setLabel("");
+        } else {
+          setError("ההעלאה נכשלה, נסו שוב.");
+        }
       }
     } catch {
-      /* fail quietly, nothing was added */
+      setError("ההעלאה נכשלה, נסו שוב.");
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="flex gap-2 mb-3">
+    <div className="mb-3">
+    <div className="flex gap-2">
       <input
         value={label}
         onChange={(e) => setLabel(e.target.value)}
@@ -2514,7 +2599,13 @@ function GeneralDocUploadButton({ onAdd }) {
       >
         {busy ? "מעלה..." : "+ הוספת מסמך"}
       </label>
-      <input id={inputId} type="file" accept="image/*" onChange={handleFile} className="sr-only" aria-label="צירוף תמונת מסמך" />
+      <input id={inputId} type="file" accept="image/*,application/pdf,.pdf" onChange={handleFile} className="sr-only" aria-label="צירוף מסמך (תמונה או PDF)" />
+    </div>
+    {error && (
+      <p className="text-xs mt-1.5" role="alert" style={{ color: "#9C4A24", fontFamily: "Assistant, sans-serif" }}>
+        {error}
+      </p>
+    )}
     </div>
   );
 }
@@ -2578,7 +2669,8 @@ function DocumentLibrarySection({ items, roomType }) {
     generalDocs.forEach((d) => {
       list.push({
         photoKey: d.photoKey,
-        kindLabel: "מסמך כללי",
+        kind: d.kind,
+        kindLabel: d.kind === "pdf" ? "PDF" : "מסמך כללי",
         label: d.label,
         itemName: d.label,
         category: "",
@@ -2596,8 +2688,9 @@ function DocumentLibrarySection({ items, roomType }) {
     return d.itemName.includes(q) || d.category.includes(q) || d.supplier.includes(q);
   });
 
-  const removeGeneralDoc = async (docId, photoKey) => {
-    await deletePhoto(photoKey);
+  const removeGeneralDoc = async (docId, photoKey, kind) => {
+    if (kind === "pdf") await deletePdf(photoKey);
+    else await deletePhoto(photoKey);
     setGeneralDocs((prev) => prev.filter((d) => d.id !== docId));
   };
 
@@ -2605,7 +2698,7 @@ function DocumentLibrarySection({ items, roomType }) {
     <GuideAccordion title={`ספריית מסמכים (${docs.length})`} defaultOpen={docs.length === 0}>
       <div className="pt-2">
         <p className="text-xs leading-relaxed mb-3" style={{ color: C.textFaint, fontFamily: "Assistant, sans-serif" }}>
-          כל תמונות המוצר והקבלות שצירפתם להצעות מחיר מופיעות כאן אוטומטית. אפשר גם להוסיף כאן ישירות מסמך כללי (היתר, תוכנית, אחריות) שלא קשור לפריט ספציפי.
+          כל תמונות המוצר והקבלות שצירפתם להצעות מחיר מופיעות כאן אוטומטית. אפשר גם להוסיף כאן ישירות מסמך כללי (היתר, תוכנית, אחריות) שלא קשור לפריט ספציפי — תמונה או קובץ PDF (עד 10MB).
         </p>
         <GeneralDocUploadButton onAdd={(doc) => setGeneralDocs((prev) => [...prev, doc])} />
         {docs.length > 0 && (
@@ -2633,7 +2726,7 @@ function DocumentLibrarySection({ items, roomType }) {
                 key={`${doc.photoKey}-${i}`}
                 doc={doc}
                 onOpen={(url, label) => setLightbox({ url, label })}
-                onDelete={doc.deletable ? () => removeGeneralDoc(doc.docId, doc.photoKey) : null}
+                onDelete={doc.deletable ? () => removeGeneralDoc(doc.docId, doc.photoKey, doc.kind) : null}
               />
             ))}
           </div>
