@@ -1173,7 +1173,16 @@ function StudioIntroCard() {
   );
 }
 
-function ItemRow({ item, qty, onChange, activeTier, priceMult = 1, onFocusChange }) {
+// Per-item tier overrides live inside the same jsonb object as the per-category
+// tiers, under the reserved key "__items": { [itemId]: "low"|"mid"|"high" }.
+// That way no DB migration is needed and every place that already receives
+// `categoryTiers` can resolve the effective tier of a single item.
+function tierFor(categoryTiers, catName, itemId) {
+  const overrides = categoryTiers && categoryTiers.__items;
+  return (overrides && overrides[itemId]) || (categoryTiers && categoryTiers[catName]) || "mid";
+}
+
+function ItemRow({ item, qty, onChange, activeTier, isOverride = false, onTierChange, priceMult = 1, onFocusChange }) {
   const showTiers = TIERS.map((t) => qty * (item[t.key] || 0) * priceMult);
   const isLump = item.unit === "lump" || item.unit === "קומפ'";
   const inputId = useId();
@@ -1285,13 +1294,17 @@ function ItemRow({ item, qty, onChange, activeTier, priceMult = 1, onFocusChange
         </div>
       </div>
 
-      <div className="flex gap-2 mt-2" aria-hidden={qty === 0}>
+      <div className="flex gap-2 mt-2" role="radiogroup" aria-label={`בחירת רמת מחיר עבור ${item.name}`}>
         {TIERS.map((t, i) => {
           const selected = activeTier === t.key;
           return (
-            <div
+            <button
               key={t.key}
-              className="flex-1 rounded-lg py-1.5 text-center transition-colors"
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              onClick={() => onTierChange && onTierChange(t.key)}
+              className={`flex-1 rounded-lg py-1.5 min-h-[44px] text-center transition-colors ${FOCUS_RING}`}
               style={{
                 background: selected ? C.accentSoft : C.bg,
                 border: selected ? `1px solid ${C.accent}` : "1px solid transparent",
@@ -1306,10 +1319,15 @@ function ItemRow({ item, qty, onChange, activeTier, priceMult = 1, onFocusChange
               >
                 ₪{fmt(showTiers[i])}
               </p>
-            </div>
+            </button>
           );
         })}
       </div>
+      {isOverride && (
+        <p className="text-[11px] mt-1" style={{ color: C.accentText, fontFamily: "Assistant, sans-serif" }}>
+          נבחר ידנית לפריט זה · לחיצה על רמת הגימור של הקטגוריה מחזירה לברירת המחדל
+        </p>
+      )}
     </div>
   );
 }
@@ -1329,6 +1347,8 @@ function CategoryAccordion({
   source,
   onSourceChange,
   floorAccess,
+  itemTiers = {},
+  onItemTierChange,
 }) {
   const panelId = useId();
   const mult = catMult(category.name, use2026) * floorAccessMult(category.name, floorAccess);
@@ -1336,16 +1356,17 @@ function CategoryAccordion({
     (it) => (quantities[it.id] ?? it.qty) > 0
   ).length;
 
-  const totals = useMemo(() => {
-    const t = { low: 0, mid: 0, high: 0 };
+  // Estimate for this category: every item at its own tier (manual override
+  // if the user picked one, otherwise the category's tier).
+  const estimateTotal = useMemo(() => {
+    let sum = 0;
     category.items.forEach((it) => {
       const q = quantities[it.id] ?? it.qty;
-      TIERS.forEach((tr) => {
-        t[tr.key] += q * (it[tr.key] || 0) * mult;
-      });
+      const itemTier = itemTiers[it.id] || tier;
+      sum += q * (it[itemTier] || 0) * mult;
     });
-    return t;
-  }, [category, quantities, mult]);
+    return sum;
+  }, [category, quantities, mult, itemTiers, tier]);
 
   const linkedItems = (procurementItems || []).filter((it) => it.category === category.name && it.quotes.length > 0);
   const hasActualQuotes = linkedItems.length > 0;
@@ -1353,7 +1374,8 @@ function CategoryAccordion({
   const useActual = source === "actual" && hasActualQuotes;
 
   const tierLabel = TIERS.find((t) => t.key === tier).short;
-  const displayedTotal = useActual ? actualTotal : totals[tier];
+  const displayedTotal = useActual ? actualTotal : estimateTotal;
+  const overrideCount = category.items.filter((it) => itemTiers[it.id]).length;
 
   return (
     <div
@@ -1415,7 +1437,7 @@ function CategoryAccordion({
             >
               {useActual
                 ? "לפי הצעת מחיר שנבחרה"
-                : `${chosenCount > 0 ? `${chosenCount} פריטים נבחרו · ` : ""}רמת גימור: ${tierLabel}`}
+                : `${chosenCount > 0 ? `${chosenCount} פריטים נבחרו · ` : ""}רמת גימור: ${tierLabel}${overrideCount > 0 ? ` (+${overrideCount} בבחירה ידנית)` : ""}`}
             </span>
           </span>
         </div>
@@ -1520,7 +1542,9 @@ function CategoryAccordion({
               item={it}
               qty={quantities[it.id] ?? it.qty}
               onChange={(v) => onQtyChange(it.id, v)}
-              activeTier={tier}
+              activeTier={itemTiers[it.id] || tier}
+              isOverride={!!itemTiers[it.id]}
+              onTierChange={(t) => onItemTierChange && onItemTierChange(it.id, t)}
               priceMult={mult}
               onFocusChange={onFocusChange}
             />
@@ -1535,10 +1559,10 @@ function SummaryPanel({ categories, quantities, categoryTiers, use2026, floorAcc
   const titleId = useId();
   const chosen = [];
   categories.forEach((c) => {
-    const tier = categoryTiers[c.name] || "mid";
     const mult = catMult(c.name, use2026) * floorAccessMult(c.name, floorAccess);
     c.items.forEach((it) => {
       const q = quantities[it.id] ?? it.qty;
+      const tier = tierFor(categoryTiers, c.name, it.id);
       if (q > 0) chosen.push({ ...it, q, cat: c.name, tier, mult });
     });
   });
@@ -1721,7 +1745,7 @@ function Dashboard({
       let sub = 0;
       c.items.forEach((it) => {
         const q = quantities[it.id] ?? it.qty;
-        sub += q * (it[tier] || 0) * mult;
+        sub += q * (it[tierFor(categoryTiers, c.name, it.id)] || 0) * mult;
       });
       if (sub > 0) {
         lines.push(
@@ -2809,7 +2833,7 @@ function ProcurementTracker({ roomType, categories, quantities, categoryTiers, u
       let budgeted = 0;
       cat.items.forEach((it) => {
         const q = (quantities && quantities[it.id]) ?? it.qty;
-        budgeted += q * (it[tier] || 0) * mult;
+        budgeted += q * (it[tierFor(categoryTiers, catName, it.id)] || 0) * mult;
       });
       const actual = items
         .filter((it) => it.category === catName)
@@ -3731,7 +3755,7 @@ function Estimator({ user, onLogout }) {
         const q = quantities[it.id] ?? it.qty;
         if (q > 0) chosen += 1;
         if (!useActual) {
-          const amount = q * (it[tier] || 0) * mult;
+          const amount = q * (it[tierFor(categoryTiers, c.name, it.id)] || 0) * mult;
           catAmount += amount;
           blended += amount;
         }
@@ -4122,8 +4146,23 @@ function Estimator({ user, onLogout }) {
                   setOpenCats((o) => ({ ...o, [cat.name]: !o[cat.name] }))
                 }
                 tier={getCatTier(cat.name)}
+                // Choosing a category tier also clears any manual per-item picks
+                // inside that category, so the category button always "wins".
                 onTierChange={(t) =>
-                  setCategoryTiers((ct) => ({ ...ct, [cat.name]: t }))
+                  setCategoryTiers((ct) => {
+                    const overrides = { ...(ct.__items || {}) };
+                    cat.items.forEach((it) => delete overrides[it.id]);
+                    return { ...ct, [cat.name]: t, __items: overrides };
+                  })
+                }
+                itemTiers={categoryTiers.__items || {}}
+                onItemTierChange={(itemId, t) =>
+                  setCategoryTiers((ct) => {
+                    const overrides = { ...(ct.__items || {}) };
+                    if (t === (ct[cat.name] || "mid")) delete overrides[itemId];
+                    else overrides[itemId] = t;
+                    return { ...ct, __items: overrides };
+                  })
                 }
                 use2026={use2026}
                 onFocusChange={handleFocusChange}
