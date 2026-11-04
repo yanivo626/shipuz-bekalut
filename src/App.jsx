@@ -1114,6 +1114,186 @@ function DisclaimerModal({ onAccept, onBack }) {
   );
 }
 
+// Free consultation: banner + lead form. The form only INSERTs a row into the
+// `leads` table (RLS lets a signed-in user add rows but never read them back).
+// Getting the email to the designer is done server-side with a Supabase
+// Database Webhook on that table — see supabase/leads.sql — so no webhook URL
+// or email address is ever exposed in the browser.
+function ConsultationBanner({ onOpen }) {
+  const s = DATA.studio;
+  return (
+    <div
+      className="rounded-2xl p-4 mb-4 flex items-center justify-between gap-3"
+      style={{ background: C.accentSoft, border: `1px solid ${C.accent}` }}
+    >
+      <div className="min-w-0">
+        <p className="text-sm font-bold" style={{ color: C.text, fontFamily: "Heebo, sans-serif" }}>
+          רוצים לדבר עם מעצבת פנים?
+        </p>
+        <p className="text-xs mt-0.5 leading-relaxed" style={{ color: C.textMuted, fontFamily: "Assistant, sans-serif" }}>
+          שיחת ייעוץ ראשונית ללא עלות{s && s.name ? ` עם ${s.name}` : ""} — השאירו פרטים ונחזור אליכם.
+        </p>
+      </div>
+      <button
+        type="button"
+        onClick={onOpen}
+        className={`shrink-0 px-4 py-2.5 min-h-[44px] rounded-full text-xs font-bold ${FOCUS_RING}`}
+        style={{ background: C.accent, color: C.cardAlt, fontFamily: "Heebo, sans-serif" }}
+      >
+        לקביעת שיחה
+      </button>
+    </div>
+  );
+}
+
+function ConsultationModal({ user, projectId, projectName, projectType, estimateTotal, onClose }) {
+  const titleId = useId();
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState((user && user.email) || "");
+  const [notes, setNotes] = useState("");
+  const [consent, setConsent] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [done, setDone] = useState(false);
+
+  const fieldStyle = {
+    border: `1px solid ${C.border}`,
+    background: C.cardAlt,
+    color: C.text,
+    fontFamily: "Assistant, sans-serif",
+    fontSize: "16px",
+  };
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError(null);
+    const digits = phone.replace(/\D/g, "");
+    if (!name.trim()) return setError("נא למלא שם.");
+    if (digits.length < 9) return setError("נא להזין מספר טלפון תקין.");
+    if (!consent) return setError("יש לאשר שניתן ליצור איתך קשר.");
+    setBusy(true);
+    try {
+      const { error: err } = await supabase.from("leads").insert({
+        user_id: user.id,
+        project_id: projectId || null,
+        name: name.trim(),
+        phone: phone.trim(),
+        email: email.trim() || null,
+        notes: notes.trim() || null,
+        project_name: projectName || null,
+        project_type: projectType || null,
+        estimate_total: Math.round(estimateTotal || 0),
+      });
+      if (err) throw err;
+      setDone(true);
+    } catch {
+      setError("השליחה נכשלה, נסו שוב בעוד רגע.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      dir="rtl"
+      lang="he"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"
+      style={{ background: "rgba(43,38,34,0.55)" }}
+    >
+      <div
+        className="w-full sm:max-w-md sm:rounded-2xl rounded-t-2xl max-h-[92vh] overflow-y-auto"
+        style={{ background: C.cardAlt }}
+      >
+        <div className="px-6 pt-5 pb-3 flex items-center justify-between">
+          <h2 id={titleId} className="text-lg font-bold" style={{ color: C.text, fontFamily: "Heebo, sans-serif" }}>
+            שיחת ייעוץ ללא עלות
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className={`text-sm px-3 py-1.5 rounded-full min-h-[36px] ${FOCUS_RING}`}
+            style={{ background: C.bg, color: C.textMuted, fontFamily: "Assistant, sans-serif" }}
+          >
+            סגירה
+          </button>
+        </div>
+
+        {done ? (
+          <div className="px-6 pb-6">
+            <p className="text-sm leading-relaxed" style={{ color: C.text, fontFamily: "Assistant, sans-serif" }}>
+              תודה! הפרטים התקבלו, ונחזור אליכם בהקדם לקביעת שיחת הייעוץ.
+            </p>
+            <button
+              type="button"
+              onClick={onClose}
+              className={`mt-4 w-full py-3 min-h-[44px] rounded-xl text-sm font-bold ${FOCUS_RING}`}
+              style={{ background: C.accent, color: C.cardAlt, fontFamily: "Heebo, sans-serif" }}
+            >
+              חזרה לאפליקציה
+            </button>
+          </div>
+        ) : (
+          <form onSubmit={submit} className="px-6 pb-6">
+            <p className="text-xs leading-relaxed mb-3" style={{ color: C.textFaint, fontFamily: "Assistant, sans-serif" }}>
+              השאירו פרטים ומעצבת פנים תחזור אליכם לשיחת ייעוץ ראשונית, ללא עלות וללא התחייבות.
+            </p>
+
+            <label htmlFor="lead-name" className="text-xs font-semibold block mb-1" style={{ color: C.textMuted, fontFamily: "Assistant, sans-serif" }}>
+              שם מלא
+            </label>
+            <input id="lead-name" required autoComplete="name" value={name} onChange={(e) => setName(e.target.value)}
+              className={`w-full rounded-xl px-4 py-3 min-h-[44px] mb-3 ${FOCUS_RING}`} style={fieldStyle} />
+
+            <label htmlFor="lead-phone" className="text-xs font-semibold block mb-1" style={{ color: C.textMuted, fontFamily: "Assistant, sans-serif" }}>
+              טלפון
+            </label>
+            <input id="lead-phone" required type="tel" inputMode="tel" autoComplete="tel" value={phone} onChange={(e) => setPhone(e.target.value)}
+              className={`w-full rounded-xl px-4 py-3 min-h-[44px] mb-3 ${FOCUS_RING}`} style={fieldStyle} />
+
+            <label htmlFor="lead-email" className="text-xs font-semibold block mb-1" style={{ color: C.textMuted, fontFamily: "Assistant, sans-serif" }}>
+              אימייל
+            </label>
+            <input id="lead-email" type="email" autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)}
+              className={`w-full rounded-xl px-4 py-3 min-h-[44px] mb-3 ${FOCUS_RING}`} style={fieldStyle} />
+
+            <label htmlFor="lead-notes" className="text-xs font-semibold block mb-1" style={{ color: C.textMuted, fontFamily: "Assistant, sans-serif" }}>
+              ספרו בקצרה על הפרויקט (לא חובה)
+            </label>
+            <textarea id="lead-notes" rows={3} value={notes} onChange={(e) => setNotes(e.target.value)}
+              className={`w-full rounded-xl px-4 py-3 mb-3 ${FOCUS_RING}`} style={fieldStyle} />
+
+            <label className="flex items-start gap-2 mb-3 cursor-pointer">
+              <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} className={`mt-0.5 w-5 h-5 ${FOCUS_RING}`} />
+              <span className="text-xs leading-relaxed" style={{ color: C.textMuted, fontFamily: "Assistant, sans-serif" }}>
+                אני מאשר/ת שיצרו איתי קשר בנוגע לשיחת ייעוץ, ושהפרטים שמסרתי, יחד עם סיכום האומדן שלי, יועברו לסטודיו.
+              </span>
+            </label>
+
+            {error && (
+              <p role="alert" className="text-xs mb-3" style={{ color: "#9C4A24", fontFamily: "Assistant, sans-serif" }}>
+                {error}
+              </p>
+            )}
+
+            <button
+              type="submit"
+              disabled={busy}
+              className={`w-full py-3 min-h-[44px] rounded-xl text-sm font-bold ${FOCUS_RING}`}
+              style={{ background: C.accent, color: C.cardAlt, fontFamily: "Heebo, sans-serif", opacity: busy ? 0.7 : 1 }}
+            >
+              {busy ? "שולח..." : "שליחת פרטים"}
+            </button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function StudioIntroCard() {
   const s = DATA.studio;
   return (
@@ -3554,12 +3734,13 @@ function SuppliersSection() {
   );
 }
 
-function GuideTab({ roomType, blendedTotal }) {
+function GuideTab({ roomType, blendedTotal, onOpenLead }) {
   return (
     <div>
       <p className="text-xs mb-3 leading-relaxed" style={{ color: C.textFaint, fontFamily: "Assistant, sans-serif" }}>
         מדריך קצר שמלווה אתכם לאורך התהליך — מהתכנון ועד למסירה.
       </p>
+      {onOpenLead && <ConsultationBanner onOpen={onOpenLead} />}
       <ReserveCalculator blendedTotal={blendedTotal} />
       <ChecklistSection
         roomType={roomType}
@@ -3605,6 +3786,7 @@ function Estimator({ user, onLogout }) {
   const [procurementLoaded, setProcurementLoaded] = useState(false);
   const [categorySource, setCategorySource] = useState({}); // { [categoryName]: "estimate" | "actual" }
   const [confirmDialog, setConfirmDialog] = useState(null); // { message, onConfirm } | null
+  const [showLead, setShowLead] = useState(false); // free-consultation form
   const [floorAccess, setFloorAccess] = useState({ floor: 0, hasElevator: true, hasParking: true });
   const saveTimer = useRef(null);
   const procurementSaveTimer = useRef(null);
@@ -3973,7 +4155,7 @@ function Estimator({ user, onLogout }) {
           />
         )}
         {activeView === "guide" && (
-          <GuideTab roomType={activeProjectId} blendedTotal={blendedTotal} />
+          <GuideTab roomType={activeProjectId} blendedTotal={blendedTotal} onOpenLead={() => setShowLead(true)} />
         )}
         {activeView === "estimate" && (
           <>
@@ -4125,6 +4307,7 @@ function Estimator({ user, onLogout }) {
               </button>
             </div>
 
+            <ConsultationBanner onOpen={() => setShowLead(true)} />
             <StudioIntroCard />
             <p
               className="text-xs mb-3 leading-relaxed"
@@ -4231,6 +4414,16 @@ function Estimator({ user, onLogout }) {
           use2026={use2026}
           floorAccess={floorAccess}
           onClose={() => setShowSummary(false)}
+        />
+      )}
+      {showLead && (
+        <ConsultationModal
+          user={user}
+          projectId={activeProjectId}
+          projectName={activeProject ? activeProject.clientName : ""}
+          projectType={meta.title}
+          estimateTotal={blendedTotal}
+          onClose={() => setShowLead(false)}
         />
       )}
       {confirmDialog && (
